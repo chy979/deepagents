@@ -1,130 +1,70 @@
-# Builds and publishes the async-subagent-server Docker image to ghcr.io.
-#
-# Image: ghcr.io/<owner>/deepagents/async-subagent-server
-#
-# Triggers:
-#   - Push to main (publishes tag: latest + short SHA)
-#   - Push of a semver tag  examples/async-subagent-server/v*
-#     (publishes tags: v1, v1.2, v1.2.3, latest)
-#   - Manual via workflow_dispatch
-#
-# Build context is the repository root so that libs/deepagents
-# (a local editable dependency) is available inside the build.
-
-name: "Docker publish — async-subagent-server"
+name: Docker
 
 on:
+  schedule:
+    - cron: '19 19 * * *'
   push:
-    branches:
-      - main
-    tags:
-      - "examples/async-subagent-server/v*"
-    paths:
-      # Rebuild when the server code, its Dockerfile, or the shared library changes
-      - "examples/async-subagent-server/**"
-      - "libs/deepagents/**"
-      - ".github/workflows/docker-publish.yml"
-  workflow_dispatch:
-    inputs:
-      push:
-        description: "Push image to ghcr.io? (set to false for a dry-run build)"
-        required: false
-        default: "true"
-        type: choice
-        options:
-          - "true"
-          - "false"
+    branches: [ "main" ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ "main" ]
 
 env:
   REGISTRY: ghcr.io
-  # ghcr.io/<owner>/<repo>/async-subagent-server
-  IMAGE_NAME: ${{ github.repository_owner }}/deepagents/async-subagent-server
-
-permissions:
-  contents: read
-  packages: write   # required to push to ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
 
     steps:
-      # ── Checkout ───────────────────────────────────────────────────────────
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@v4
 
-      # ── Docker Buildx ──────────────────────────────────────────────────────
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5730b99d32bee3cf67b2ea0a11f1d9bdf7a6a4e # v3
-
-      # ── Login to ghcr.io ───────────────────────────────────────────────────
-      # GITHUB_TOKEN is automatically provided — no extra secret needed.
-      - name: Log in to GitHub Container Registry
+      - name: Install cosign
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 #v3.5.0
+        with:
+          cosign-release: 'v2.2.4'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
+
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3.0.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Image metadata & tags ──────────────────────────────────────────────
-      # Tag strategy:
-      #   branch push (main)  → sha-<short>, edge
-      #   semver tag          → v1, v1.2, v1.2.3, latest
-      #   workflow_dispatch   → sha-<short>, manual
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbea8a68ae27b6b7bda34c59e7e1 # v5
+        uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            # short SHA on every push
-            type=sha,prefix=sha-,format=short
-            # "edge" on pushes to main
-            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
-            # "latest" + semver tags on version tags
-            type=semver,pattern={{version}},value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/examples/async-subagent-server/v') }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/examples/async-subagent-server/v') }}
-            type=semver,pattern={{major}},value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/examples/async-subagent-server/v') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/examples/async-subagent-server/v') }}
-            # "manual" on workflow_dispatch
-            type=raw,value=manual,enable=${{ github.event_name == 'workflow_dispatch' }}
-          labels: |
-            org.opencontainers.image.title=async-subagent-server
-            org.opencontainers.image.description=Self-hosted Agent Protocol server exposing a DeepAgents researcher as an async subagent
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}/tree/main/examples/async-subagent-server
 
-      # ── Build & push ───────────────────────────────────────────────────────
-      # Build context is the repo root so COPY libs/deepagents works.
-      # The Dockerfile lives inside the example subdirectory.
+      # Build context is the repo root so that COPY libs/deepagents works.
+      # The Dockerfile lives in the example subdirectory.
       - name: Build and push Docker image
-        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
+        id: build-and-push
+        uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
         with:
           context: .
           file: examples/async-subagent-server/Dockerfile
-          platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' && (github.event.inputs.push != 'false') }}
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Layer cache: store in ghcr.io alongside the image
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache,mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      # ── Summary ────────────────────────────────────────────────────────────
-      - name: Write job summary
-        if: always()
-        run: |
-          echo "## Docker build summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| | |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Registry** | \`${{ env.REGISTRY }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Image** | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Trigger** | \`${{ github.event_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Ref** | \`${{ github.ref }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Tags published" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+      - name: Sign the published Docker image
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+        run: echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
